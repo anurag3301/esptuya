@@ -1,8 +1,8 @@
 #include <cstring>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
-#include <cstdint>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -16,6 +16,7 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "nvs_flash.h"
+#include "ssd1306.h"
 #include "tuya_client.hpp"
 #include "wifi_cred.hpp"
 
@@ -27,8 +28,10 @@ static const char *BTN_TAG = "buttons";
 static constexpr gpio_num_t kButtonPins[] = {GPIO_NUM_14, GPIO_NUM_27, GPIO_NUM_25};
 static constexpr gpio_num_t kI2cSdaPin = GPIO_NUM_21;
 static constexpr gpio_num_t kI2cSclPin = GPIO_NUM_22;
+static constexpr i2c_port_t kI2cPort = I2C_NUM_0;
 static QueueHandle_t s_button_evt_queue = nullptr;
 static QueueHandle_t s_dp_cmd_queue = nullptr;
+static OLED_Config s_oled_cfg{};
 
 // Tuya devices (extendable list)
 static TuyaDeviceConfig kTuyaDevices[] = {
@@ -199,6 +202,41 @@ static void initialise_i2c()
 	ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0));
 }
 
+static int32_t oled_send_i2c(void *user_context, uint8_t i2c_address_7bit, const uint8_t *data,
+                             size_t length)
+{
+	if (!data || length == 0) {
+		return OLED_ERR_INVALID_ARG;
+	}
+
+	i2c_port_t port = static_cast<i2c_port_t>(reinterpret_cast<intptr_t>(user_context));
+	esp_err_t err = i2c_master_write_to_device(port, i2c_address_7bit, data, length,
+	                                           pdMS_TO_TICKS(50));
+	return (err == ESP_OK) ? OLED_OK : OLED_ERR_IO;
+}
+
+static void initialise_oled()
+{
+	s_oled_cfg.bus_type = OLED_BUS_I2C;
+	s_oled_cfg.width = 128;
+	s_oled_cfg.height = 32;
+	s_oled_cfg.user_context = reinterpret_cast<void *>(static_cast<intptr_t>(kI2cPort));
+	s_oled_cfg.transport.i2c.i2c_address_7bit = 0x3C;
+	s_oled_cfg.transport.i2c.send_fn = oled_send_i2c;
+
+	int32_t init_status = OLED_Init(&s_oled_cfg);
+	if (init_status != OLED_OK) {
+		ESP_LOGE(TAG, "OLED init failed: %ld", (long)init_status);
+		return;
+	}
+
+	if (OLED_Fill(&s_oled_cfg, 0xFF) != OLED_OK) {
+		ESP_LOGE(TAG, "OLED fill failed");
+	} else {
+		ESP_LOGI(TAG, "OLED initialized and filled");
+	}
+}
+
 static void scan_i2c_bus()
 {
 	ESP_LOGI(TAG, "Scanning I2C bus (SDA=%d, SCL=%d)", (int)kI2cSdaPin, (int)kI2cSclPin);
@@ -226,6 +264,7 @@ extern "C" void app_main(void)
 
 	initialise_i2c();
 	scan_i2c_bus();
+	initialise_oled();
 	initialise_wifi();
 	initialise_buttons();
 
