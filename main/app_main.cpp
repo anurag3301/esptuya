@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <cstdint>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -13,6 +14,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "driver/gpio.h"
+#include "driver/i2c.h"
 #include "nvs_flash.h"
 #include "tuya_client.hpp"
 #include "wifi_cred.hpp"
@@ -23,6 +25,8 @@ static const char *TAG = "app_main";
 static const char *BTN_TAG = "buttons";
 
 static constexpr gpio_num_t kButtonPins[] = {GPIO_NUM_14, GPIO_NUM_27, GPIO_NUM_25};
+static constexpr gpio_num_t kI2cSdaPin = GPIO_NUM_21;
+static constexpr gpio_num_t kI2cSclPin = GPIO_NUM_22;
 static QueueHandle_t s_button_evt_queue = nullptr;
 static QueueHandle_t s_dp_cmd_queue = nullptr;
 
@@ -181,6 +185,37 @@ static void initialise_wifi()
 	}
 }
 
+static void initialise_i2c()
+{
+	i2c_config_t conf = {};
+	conf.mode = I2C_MODE_MASTER;
+	conf.sda_io_num = kI2cSdaPin;
+	conf.scl_io_num = kI2cSclPin;
+	conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+	conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+	conf.master.clk_speed = 100000;  // 100kHz
+
+	ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &conf));
+	ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0));
+}
+
+static void scan_i2c_bus()
+{
+	ESP_LOGI(TAG, "Scanning I2C bus (SDA=%d, SCL=%d)", (int)kI2cSdaPin, (int)kI2cSclPin);
+	for (uint8_t addr = 1; addr < 0x7F; ++addr) {
+		i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+		i2c_master_start(cmd);
+		i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+		i2c_master_stop(cmd);
+		esp_err_t err = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(50));
+		i2c_cmd_link_delete(cmd);
+		if (err == ESP_OK) {
+			ESP_LOGI(TAG, "Found I2C device at address 0x%02X", addr);
+		}
+	}
+	ESP_LOGI(TAG, "I2C scan complete");
+}
+
 extern "C" void app_main(void)
 {
 	esp_err_t ret = nvs_flash_init();
@@ -189,6 +224,8 @@ extern "C" void app_main(void)
 		ESP_ERROR_CHECK(nvs_flash_init());
 	}
 
+	initialise_i2c();
+	scan_i2c_bus();
 	initialise_wifi();
 	initialise_buttons();
 
