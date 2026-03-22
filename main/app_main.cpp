@@ -17,6 +17,7 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "nvs_flash.h"
+#include "gfx.h"
 #include "ssd1306.h"
 #include "tuya_client.hpp"
 #include "wifi_cred.hpp"
@@ -46,6 +47,10 @@ static constexpr gpio_num_t kI2cSclPin = GPIO_NUM_22;
 static constexpr i2c_port_t kI2cPort = I2C_NUM_0;
 static QueueHandle_t s_button_evt_queue = nullptr;
 static OLED_Config s_oled_cfg{};
+static GFX_Framebuffer s_fb{};
+static uint8_t s_fb_buffer[128 * 4];  // 128x32 display, 4 pages
+
+static void oled_show_message(const char *line1, const char *line2);
 
 // Tuya devices (extendable list)
 static TuyaDeviceConfig kTuyaDevices[] = {
@@ -231,6 +236,7 @@ static void initialise_wifi()
 	                                       portMAX_DELAY);
 	if (bits & WIFI_CONNECTED_BIT) {
 		ESP_LOGI(TAG, "WiFi connected");
+		oled_show_message("WiFi\nconnected", nullptr);
 	}
 }
 
@@ -276,11 +282,16 @@ static void initialise_oled()
 		return;
 	}
 
-	if (OLED_Fill(&s_oled_cfg, 0xFF) != OLED_OK) {
-		ESP_LOGE(TAG, "OLED fill failed");
-	} else {
-		ESP_LOGI(TAG, "OLED initialized and filled");
+	s_fb = GFX_Init(s_oled_cfg.width, s_oled_cfg.height, s_fb_buffer, sizeof(s_fb_buffer),
+	                OLED_GfxFlushCallback, &s_oled_cfg);
+	if (!GFX_IsReady(&s_fb)) {
+		ESP_LOGE(TAG, "GFX framebuffer init failed");
+		return;
 	}
+
+	GFX_Clear(&s_fb, 0);
+	GFX_Present(&s_fb);
+	ESP_LOGI(TAG, "OLED initialized with framebuffer");
 }
 
 static void scan_i2c_bus()
@@ -300,6 +311,22 @@ static void scan_i2c_bus()
 	ESP_LOGI(TAG, "I2C scan complete");
 }
 
+static void oled_show_message(const char *line1, const char *line2)
+{
+	if (!GFX_IsReady(&s_fb)) {
+		return;
+	}
+
+	GFX_Clear(&s_fb, 0);
+	if (line1) {
+		GFX_DrawStr(&s_fb, const_cast<char *>(line1), 0, 4, 12, 1);
+	}
+	if (line2) {
+		GFX_DrawStr(&s_fb, const_cast<char *>(line2), 0, 18, 12, 1);
+	}
+	GFX_Present(&s_fb);
+}
+
 extern "C" void app_main(void)
 {
 	esp_err_t ret = nvs_flash_init();
@@ -311,6 +338,7 @@ extern "C" void app_main(void)
 	initialise_i2c();
 	scan_i2c_bus();
 	initialise_oled();
+	oled_show_message("Connecting\nWIFI...", nullptr);
 	initialise_wifi();
 	initialise_buttons();
 
