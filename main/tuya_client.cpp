@@ -412,6 +412,11 @@ static void append_dp_value(std::stringstream &ss, const DpCommand &cmd)
 	case DpCommand::Type::STRING:
 		ss << "\"" << cmd.str_val << "\"";
 		break;
+	case DpCommand::Type::QUERY:
+		// Queries do not embed DP values
+		break;
+	case DpCommand::Type::RESET:
+		break;
 	}
 }
 
@@ -423,6 +428,7 @@ TuyaClient::TuyaClient(const TuyaDeviceConfig &config, QueueHandle_t cmd_queue)
     : cfg_(config), cmd_queue_(cmd_queue) {}
 
 extern "C" bool tuya_notify_dp20(const char *device_id, bool on);
+extern "C" void tuya_notify_activity(const char *device_id);
 
 void TuyaClient::monitor_loop()
 {
@@ -593,21 +599,43 @@ void TuyaClient::monitor_loop()
 			if (cmd_queue_) {
 				DpCommand cmd;
 				while (xQueueReceive(cmd_queue_, &cmd, 0) == pdTRUE) {
-					std::stringstream ss_payload;
-					long currenttime = time(nullptr);
-					ss_payload << "{\"protocol\":5,\"t\":" << currenttime << ",\"data\":{\"dps\":{\""
-					           << cmd.dp << "\":";
-					append_dp_value(ss_payload, cmd);
-					ss_payload << "}}}";
-					std::string payload = ss_payload.str();
+					if (cmd.type == DpCommand::Type::QUERY) {
+						std::stringstream ss_payload;
+						long currenttime = time(nullptr);
+						ss_payload << "{\"gwId\":\"" << cfg_.id << "\",\"devId\":\"" << cfg_.id
+						           << "\",\"uid\":\"" << cfg_.id << "\",\"t\":\"" << currenttime << "\"}";
+						std::string payload = ss_payload.str();
 
-					int len = client.BuildTuyaMessage(message_buffer, TUYA_CONTROL_NEW, payload);
-					if (len > 0) {
-						ssize_t sent = write(sockfd, message_buffer, len);
-						if (sent == len) {
-							ESP_LOGI(LOG_TAG, "[%s] Sent DP%d command", dev, cmd.dp);
-						} else {
-							ESP_LOGW(LOG_TAG, "[%s] Failed to send DP%d command", dev, cmd.dp);
+						int len = client.BuildTuyaMessage(message_buffer, TUYA_DP_QUERY_NEW, payload);
+						if (len > 0) {
+							ssize_t sent = write(sockfd, message_buffer, len);
+							if (sent == len) {
+								ESP_LOGI(LOG_TAG, "[%s] Sent DP query (manual)", dev);
+							} else {
+								ESP_LOGW(LOG_TAG, "[%s] Failed to send DP query", dev);
+							}
+						}
+					} else if (cmd.type == DpCommand::Type::RESET) {
+						ESP_LOGW(LOG_TAG, "[%s] Reset command received; reconnecting", dev);
+						state = State::DISCONNECTING;
+						continue;
+					} else {
+						std::stringstream ss_payload;
+						long currenttime = time(nullptr);
+						ss_payload << "{\"protocol\":5,\"t\":" << currenttime << ",\"data\":{\"dps\":{\""
+						           << cmd.dp << "\":";
+						append_dp_value(ss_payload, cmd);
+						ss_payload << "}}}";
+						std::string payload = ss_payload.str();
+
+						int len = client.BuildTuyaMessage(message_buffer, TUYA_CONTROL_NEW, payload);
+						if (len > 0) {
+							ssize_t sent = write(sockfd, message_buffer, len);
+							if (sent == len) {
+								ESP_LOGI(LOG_TAG, "[%s] Sent DP%d command", dev, cmd.dp);
+							} else {
+								ESP_LOGW(LOG_TAG, "[%s] Failed to send DP%d command", dev, cmd.dp);
+							}
 						}
 					}
 				}
@@ -633,6 +661,7 @@ void TuyaClient::monitor_loop()
 			ssize_t len = read(sockfd, message_buffer, sizeof(message_buffer));
 			if (len > 0) {
 				last_rx_time = time(nullptr);
+				tuya_notify_activity(cfg_.id.c_str());
 				std::string decoded = client.DecodeTuyaMessage(message_buffer, len);
 				if (!decoded.empty()) {
 					ESP_LOGI(LOG_TAG, "[%s] Received: %s", dev, decoded.c_str());
@@ -662,6 +691,13 @@ void TuyaClient::monitor_loop()
 						last_rx_time = now_hb;
 					}
 				}
+			}
+
+			// If we haven't received anything for a while, drop the connection and retry
+			if (time(nullptr) - last_rx_time > 30) {
+				ESP_LOGW(LOG_TAG, "[%s] No data/ack in 30s, resetting connection", dev);
+				state = State::DISCONNECTING;
+				continue;
 			}
 			break;
 		}

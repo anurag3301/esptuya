@@ -15,7 +15,9 @@ struct DpCommand {
 	enum class Type {
 		BOOL,
 		INT,
-		STRING
+		STRING,
+		QUERY,
+		RESET
 	} type;
 	int dp;
 	bool bool_val;

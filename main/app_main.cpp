@@ -54,8 +54,12 @@ static esp_timer_handle_t s_oled_clear_timer = nullptr;
 static void oled_show_message(const char *line1, const char *line2);
 static const char *get_device_label(size_t idx);
 extern "C" bool tuya_notify_dp20(const char *device_id, bool on);
+extern "C" void tuya_notify_activity(const char *device_id);
 static void schedule_oled_clear();
 static void clear_oled_callback(void *arg);
+static void render_led_status();
+static void request_status_queries();
+static void update_connectivity_status();
 
 // Tuya devices (extendable list)
 static TuyaDeviceConfig kTuyaDevices[] = {
@@ -77,6 +81,13 @@ static bool send_dp_to_device(size_t device_idx, const DpCommand &cmd)
 	return xQueueSend(q, &cmd, 0) == pdTRUE;
 }
 
+static void send_reset_to_device(size_t device_idx)
+{
+	DpCommand cmd{};
+	cmd.type = DpCommand::Type::RESET;
+	send_dp_to_device(device_idx, cmd);
+}
+
 static const char *get_device_label(size_t idx)
 {
 	switch (idx) {
@@ -90,6 +101,17 @@ static const char *get_device_label(size_t idx)
 		return "LED?";
 	}
 }
+
+struct DeviceStatus {
+	bool connected;
+	bool has_dp;
+	bool on;
+};
+static DeviceStatus s_device_status[kTuyaDeviceCount] = {};
+static esp_timer_handle_t s_status_timer = nullptr;
+static esp_timer_handle_t s_status_query_timer = nullptr;
+static int64_t s_last_dp20_update_us[kTuyaDeviceCount] = {};
+static int64_t s_last_activity_us[kTuyaDeviceCount] = {};
 
 extern "C" bool tuya_send_dp_bool(int dp, bool value)
 {
@@ -260,6 +282,7 @@ static void initialise_wifi()
 	if (bits & WIFI_CONNECTED_BIT) {
 		ESP_LOGI(TAG, "WiFi connected");
 		oled_show_message("WiFi\nconnected", nullptr);
+		schedule_oled_clear();
 	}
 }
 
@@ -326,6 +349,36 @@ static void initialise_oled()
 		};
 		ESP_ERROR_CHECK(esp_timer_create(&args, &s_oled_clear_timer));
 	}
+
+	if (!s_status_timer) {
+		const esp_timer_create_args_t args = {
+		    .callback = [](void *arg) {
+			    (void)arg;
+			    update_connectivity_status();
+		    },
+		    .arg = nullptr,
+		    .dispatch_method = ESP_TIMER_TASK,
+		    .name = "status_refresh",
+		    .skip_unhandled_events = true,
+		};
+		ESP_ERROR_CHECK(esp_timer_create(&args, &s_status_timer));
+		esp_timer_start_periodic(s_status_timer, 10 * 1000 * 1000ULL);
+	}
+
+	if (!s_status_query_timer) {
+		const esp_timer_create_args_t args = {
+		    .callback = [](void *arg) {
+			    (void)arg;
+			    request_status_queries();
+		    },
+		    .arg = nullptr,
+		    .dispatch_method = ESP_TIMER_TASK,
+		    .name = "status_query",
+		    .skip_unhandled_events = true,
+		};
+		ESP_ERROR_CHECK(esp_timer_create(&args, &s_status_query_timer));
+		esp_timer_start_periodic(s_status_query_timer, 60 * 1000 * 1000ULL);
+	}
 }
 
 static void scan_i2c_bus()
@@ -361,14 +414,81 @@ static void oled_show_message(const char *line1, const char *line2)
 	GFX_Present(&s_fb);
 }
 
-static void clear_oled_callback(void *arg)
+static void render_led_status()
 {
-	(void)arg;
 	if (!GFX_IsReady(&s_fb)) {
 		return;
 	}
+
 	GFX_Clear(&s_fb, 0);
+
+	// Compute circle positions evenly across width
+	const int16_t center_y = 16;
+	const int16_t radius = 6;
+	const int16_t gap = 40;  // spacing between centers
+	const int16_t start_x = 20;
+
+	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
+		if (!s_device_status[i].connected || !s_device_status[i].has_dp) {
+			continue;  // don't draw if not reachable
+		}
+		int16_t cx = start_x + (int16_t)(i * gap);
+		if (s_device_status[i].on) {
+			GFX_DrawCircle(&s_fb, cx, center_y, radius, 1, 1, 1);
+		} else {
+			GFX_DrawCircle(&s_fb, cx, center_y, radius, 1, 0, 1);
+		}
+	}
+
+	// Draw separators
+	GFX_DrawLine(&s_fb, 0, 0, 127, 0, 1);
+	GFX_DrawLine(&s_fb, 0, 31, 127, 31, 1);
+
 	GFX_Present(&s_fb);
+}
+
+static void request_status_queries()
+{
+	// enqueue a DP query for each device to refresh status
+	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
+		DpCommand cmd{};
+		cmd.type = DpCommand::Type::QUERY;
+		cmd.dp = 0;
+		send_dp_to_device(i, cmd);
+	}
+}
+
+static void update_connectivity_status()
+{
+	int64_t now = esp_timer_get_time();
+	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
+		bool was_connected = s_device_status[i].connected;
+		int64_t last_seen = (s_last_activity_us[i] != 0) ? s_last_activity_us[i] : s_last_dp20_update_us[i];
+
+		// If we haven't seen activity in >30s, mark disconnected and reset
+		if (last_seen == 0) {
+			s_device_status[i].connected = false;
+			s_device_status[i].has_dp = false;
+			if (was_connected) {
+				send_reset_to_device(i);
+			}
+			continue;
+		}
+		if (now - last_seen > 30 * 1000 * 1000LL) {
+			s_device_status[i].connected = false;
+			s_device_status[i].has_dp = false;
+			if (was_connected) {
+				send_reset_to_device(i);
+			}
+		}
+	}
+	render_led_status();
+}
+
+static void clear_oled_callback(void *arg)
+{
+	(void)arg;
+	render_led_status();
 }
 
 static void schedule_oled_clear()
@@ -395,6 +515,7 @@ extern "C" void app_main(void)
 	oled_show_message("Connecting\nWIFI...", nullptr);
 	initialise_wifi();
 	initialise_buttons();
+	render_led_status();
 
 	auto tuya_task = [](void *arg) {
 		auto *bundle = static_cast<std::pair<TuyaDeviceConfig *, QueueHandle_t> *>(arg);
@@ -424,11 +545,23 @@ extern "C" bool tuya_notify_dp20(const char *device_id, bool on)
 {
 	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
 		if (kTuyaDevices[i].id == device_id) {
-			const char *dev_label = get_device_label(i);
-			oled_show_message(dev_label, on ? "ON" : "OFF");
-			schedule_oled_clear();
+			s_device_status[i].connected = true;
+			s_device_status[i].has_dp = true;
+			s_device_status[i].on = on;
+			s_last_dp20_update_us[i] = esp_timer_get_time();
+			render_led_status();
 			return true;
 		}
 	}
 	return false;
+}
+
+extern "C" void tuya_notify_activity(const char *device_id)
+{
+	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
+		if (kTuyaDevices[i].id == device_id) {
+			s_last_activity_us[i] = esp_timer_get_time();
+			return;
+		}
+	}
 }
