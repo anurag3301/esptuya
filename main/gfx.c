@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <string.h>
+#include <stdbool.h>
 
 #define GFX_CHAR_MAX_BITMAP_BYTES 512U
 
@@ -155,6 +156,76 @@ void GFX_DrawBitmap(GFX_Framebuffer *fb, const GFX_Bitmap *bitmap, int16_t x, in
             uint8_t pixel_on = (bitmap->data[byte_index] & bit_mask) ? 1U : 0U;
 
             GFX_DrawPixel(fb, (int16_t)(x + (int16_t)bx), (int16_t)(y + (int16_t)by), pixel_on);
+        }
+    }
+}
+
+void GFX_DrawLine(GFX_Framebuffer *fb, int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t color){
+    if (GFX_IsReady(fb) == 0U){
+        return;
+    }
+
+    int16_t dx = (x1 > x0) ? (x1 - x0) : (x0 - x1);
+    int16_t sx = (x0 < x1) ? 1 : -1;
+    int16_t dy = (y1 > y0) ? (y1 - y0) : (y0 - y1);
+    int16_t sy = (y0 < y1) ? 1 : -1;
+    int16_t err = (dx > dy ? dx : -dy) / 2;
+
+    while (true) {
+        GFX_DrawPixel(fb, x0, y0, color);
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int16_t e2 = err;
+        if (e2 > -dx) {
+            err -= dy;
+            x0 += sx;
+        }
+        if (e2 < dy) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+void GFX_DrawCircle(GFX_Framebuffer *fb, int16_t cx, int16_t cy, uint16_t radius, uint8_t thickness, uint8_t filled, uint8_t color){
+    if ((GFX_IsReady(fb) == 0U) || (radius == 0U)){
+        return;
+    }
+    if (thickness == 0U){
+        thickness = 1U;
+    }
+
+    for (uint8_t t = 0; t < thickness; ++t) {
+        int16_t r = (int16_t)radius - (int16_t)t;
+        int16_t x = r;
+        int16_t y = 0;
+        int16_t err = 1 - x;
+
+        while (x >= y) {
+            if (filled) {
+                GFX_DrawLine(fb, cx - x, cy + y, cx + x, cy + y, color);
+                GFX_DrawLine(fb, cx - y, cy + x, cx + y, cy + x, color);
+                GFX_DrawLine(fb, cx - x, cy - y, cx + x, cy - y, color);
+                GFX_DrawLine(fb, cx - y, cy - x, cx + y, cy - x, color);
+            } else {
+                GFX_DrawPixel(fb, cx + x, cy + y, color);
+                GFX_DrawPixel(fb, cx + y, cy + x, color);
+                GFX_DrawPixel(fb, cx - y, cy + x, color);
+                GFX_DrawPixel(fb, cx - x, cy + y, color);
+                GFX_DrawPixel(fb, cx - x, cy - y, color);
+                GFX_DrawPixel(fb, cx - y, cy - x, color);
+                GFX_DrawPixel(fb, cx + y, cy - x, color);
+                GFX_DrawPixel(fb, cx + x, cy - y, color);
+            }
+
+            y++;
+            if (err < 0) {
+                err += 2 * y + 1;
+            } else {
+                x--;
+                err += 2 * (y - x + 1);
+            }
         }
     }
 }

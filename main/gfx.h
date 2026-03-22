@@ -70,6 +70,9 @@ int32_t GFX_DrawChar(GFX_Framebuffer *fb, char ch, int16_t x, int16_t y, uint16_
 
 int32_t GFX_DrawStr(GFX_Framebuffer *fb, char *str, int16_t x, int16_t y, uint16_t target_height, uint8_t color);
 
+void GFX_DrawLine(GFX_Framebuffer *fb, int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t color);
+void GFX_DrawCircle(GFX_Framebuffer *fb, int16_t cx, int16_t cy, uint16_t radius, uint8_t thickness, uint8_t filled, uint8_t color);
+
 int32_t GFX_Present(const GFX_Framebuffer *fb);
 
 #ifdef __cplusplus
