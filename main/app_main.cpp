@@ -49,8 +49,13 @@ static QueueHandle_t s_button_evt_queue = nullptr;
 static OLED_Config s_oled_cfg{};
 static GFX_Framebuffer s_fb{};
 static uint8_t s_fb_buffer[128 * 4];  // 128x32 display, 4 pages
+static esp_timer_handle_t s_oled_clear_timer = nullptr;
 
 static void oled_show_message(const char *line1, const char *line2);
+static const char *get_device_label(size_t idx);
+extern "C" bool tuya_notify_dp20(const char *device_id, bool on);
+static void schedule_oled_clear();
+static void clear_oled_callback(void *arg);
 
 // Tuya devices (extendable list)
 static TuyaDeviceConfig kTuyaDevices[] = {
@@ -70,6 +75,20 @@ static bool send_dp_to_device(size_t device_idx, const DpCommand &cmd)
 		return false;
 	}
 	return xQueueSend(q, &cmd, 0) == pdTRUE;
+}
+
+static const char *get_device_label(size_t idx)
+{
+	switch (idx) {
+	case 0:
+		return "LED1";
+	case 1:
+		return "LED2";
+	case 2:
+		return "LED3";
+	default:
+		return "LED?";
+	}
 }
 
 extern "C" bool tuya_send_dp_bool(int dp, bool value)
@@ -175,6 +194,10 @@ static void button_task(void *arg)
 				cmd.dp = 20;
 				cmd.bool_val = kButtons[idx].dp_on;
 				send_dp_to_device(kButtons[idx].device_idx, cmd);
+
+				const char *dev_label = get_device_label(kButtons[idx].device_idx);
+				oled_show_message(kButtons[idx].dp_on ? "Turning ON" : "Turning OFF", dev_label);
+				schedule_oled_clear();
 			}
 		}
 	}
@@ -292,6 +315,17 @@ static void initialise_oled()
 	GFX_Clear(&s_fb, 0);
 	GFX_Present(&s_fb);
 	ESP_LOGI(TAG, "OLED initialized with framebuffer");
+
+	if (!s_oled_clear_timer) {
+		const esp_timer_create_args_t args = {
+		    .callback = &clear_oled_callback,
+		    .arg = nullptr,
+		    .dispatch_method = ESP_TIMER_TASK,
+		    .name = "oled_clear",
+		    .skip_unhandled_events = false,
+		};
+		ESP_ERROR_CHECK(esp_timer_create(&args, &s_oled_clear_timer));
+	}
 }
 
 static void scan_i2c_bus()
@@ -322,9 +356,29 @@ static void oled_show_message(const char *line1, const char *line2)
 		GFX_DrawStr(&s_fb, const_cast<char *>(line1), 0, 4, 12, 1);
 	}
 	if (line2) {
-		GFX_DrawStr(&s_fb, const_cast<char *>(line2), 0, 18, 12, 1);
+		GFX_DrawStr(&s_fb, const_cast<char *>(line2), 0, 20, 12, 1);
 	}
 	GFX_Present(&s_fb);
+}
+
+static void clear_oled_callback(void *arg)
+{
+	(void)arg;
+	if (!GFX_IsReady(&s_fb)) {
+		return;
+	}
+	GFX_Clear(&s_fb, 0);
+	GFX_Present(&s_fb);
+}
+
+static void schedule_oled_clear()
+{
+	if (!s_oled_clear_timer) {
+		return;
+	}
+	// Cancel existing timer and restart a one-shot 10s clear
+	esp_timer_stop(s_oled_clear_timer);
+	esp_timer_start_once(s_oled_clear_timer, 10 * 1000 * 1000ULL);
 }
 
 extern "C" void app_main(void)
@@ -364,4 +418,17 @@ extern "C" void app_main(void)
 		std::snprintf(task_name, sizeof(task_name), "tuya_%u", (unsigned)i);
 		xTaskCreatePinnedToCore(tuya_task, task_name, 12288, bundle, 5, nullptr, 1);
 	}
+}
+
+extern "C" bool tuya_notify_dp20(const char *device_id, bool on)
+{
+	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
+		if (kTuyaDevices[i].id == device_id) {
+			const char *dev_label = get_device_label(i);
+			oled_show_message(dev_label, on ? "ON" : "OFF");
+			schedule_oled_clear();
+			return true;
+		}
+	}
+	return false;
 }

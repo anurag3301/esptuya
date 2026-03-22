@@ -422,6 +422,8 @@ constexpr const char *LOG_TAG = "tuya_client";
 TuyaClient::TuyaClient(const TuyaDeviceConfig &config, QueueHandle_t cmd_queue)
     : cfg_(config), cmd_queue_(cmd_queue) {}
 
+extern "C" bool tuya_notify_dp20(const char *device_id, bool on);
+
 void TuyaClient::monitor_loop()
 {
 	const char *dev = cfg_.id.c_str();
@@ -634,6 +636,11 @@ void TuyaClient::monitor_loop()
 				std::string decoded = client.DecodeTuyaMessage(message_buffer, len);
 				if (!decoded.empty()) {
 					ESP_LOGI(LOG_TAG, "[%s] Received: %s", dev, decoded.c_str());
+					if (decoded.find("\"20\":true") != std::string::npos) {
+						tuya_notify_dp20(cfg_.id.c_str(), true);
+					} else if (decoded.find("\"20\":false") != std::string::npos) {
+						tuya_notify_dp20(cfg_.id.c_str(), false);
+					}
 				}
 			} else if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
 				ESP_LOGE(LOG_TAG, "[%s] Read error: errno %d", dev, errno);
