@@ -26,12 +26,25 @@ static const int WIFI_CONNECTED_BIT = BIT0;
 static const char *TAG = "app_main";
 static const char *BTN_TAG = "buttons";
 
-static constexpr gpio_num_t kButtonPins[] = {GPIO_NUM_14, GPIO_NUM_27, GPIO_NUM_25};
+struct ButtonPin {
+	gpio_num_t pin;
+	const char *label;
+	size_t device_idx;
+	bool dp_on;
+};
+
+static constexpr ButtonPin kButtons[] = {
+    {GPIO_NUM_2, "LED1_OFF", 0, false},
+    {GPIO_NUM_13, "LED1_ON", 0, true},
+    {GPIO_NUM_27, "LED2_OFF", 1, false},
+    {GPIO_NUM_25, "LED2_ON", 1, true},
+    {GPIO_NUM_32, "LED3_OFF", 2, false},
+    {GPIO_NUM_19, "LED3_ON", 2, true},
+};
 static constexpr gpio_num_t kI2cSdaPin = GPIO_NUM_21;
 static constexpr gpio_num_t kI2cSclPin = GPIO_NUM_22;
 static constexpr i2c_port_t kI2cPort = I2C_NUM_0;
 static QueueHandle_t s_button_evt_queue = nullptr;
-static QueueHandle_t s_dp_cmd_queue = nullptr;
 static OLED_Config s_oled_cfg{};
 
 // Tuya devices (extendable list)
@@ -40,38 +53,63 @@ static TuyaDeviceConfig kTuyaDevices[] = {
     {"d7db896f97ef916559rupj", "1LlwJ}]'K^Uo|FeG", "192.168.0.101", "3.5"},
     {"d7e99af7c96c2ed634oi2p", "1b2+q_?*EdJIsB+o", "192.168.0.102", "3.5"},
 };
+static constexpr size_t kTuyaDeviceCount = sizeof(kTuyaDevices) / sizeof(kTuyaDevices[0]);
+static QueueHandle_t s_dp_cmd_queues[kTuyaDeviceCount] = {};
+static bool send_dp_to_device(size_t device_idx, const DpCommand &cmd)
+{
+	if (device_idx >= kTuyaDeviceCount) {
+		return false;
+	}
+	QueueHandle_t q = s_dp_cmd_queues[device_idx];
+	if (!q) {
+		return false;
+	}
+	return xQueueSend(q, &cmd, 0) == pdTRUE;
+}
 
 extern "C" bool tuya_send_dp_bool(int dp, bool value)
 {
-	if (!s_dp_cmd_queue)
-		return false;
 	DpCommand cmd{};
 	cmd.type = DpCommand::Type::BOOL;
 	cmd.dp = dp;
 	cmd.bool_val = value;
-	return xQueueSend(s_dp_cmd_queue, &cmd, 0) == pdTRUE;
+	bool sent = false;
+	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
+		if (send_dp_to_device(i, cmd)) {
+			sent = true;
+		}
+	}
+	return sent;
 }
 
 extern "C" bool tuya_send_dp_int(int dp, int value)
 {
-	if (!s_dp_cmd_queue)
-		return false;
 	DpCommand cmd{};
 	cmd.type = DpCommand::Type::INT;
 	cmd.dp = dp;
 	cmd.int_val = value;
-	return xQueueSend(s_dp_cmd_queue, &cmd, 0) == pdTRUE;
+	bool sent = false;
+	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
+		if (send_dp_to_device(i, cmd)) {
+			sent = true;
+		}
+	}
+	return sent;
 }
 
 extern "C" bool tuya_send_dp_string(int dp, const char *value)
 {
-	if (!s_dp_cmd_queue)
-		return false;
 	DpCommand cmd{};
 	cmd.type = DpCommand::Type::STRING;
 	cmd.dp = dp;
 	strncpy(cmd.str_val, value ? value : "", sizeof(cmd.str_val) - 1);
-	return xQueueSend(s_dp_cmd_queue, &cmd, 0) == pdTRUE;
+	bool sent = false;
+	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
+		if (send_dp_to_device(i, cmd)) {
+			sent = true;
+		}
+	}
+	return sent;
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
@@ -104,12 +142,12 @@ static void IRAM_ATTR button_isr_handler(void *arg)
 static void button_task(void *arg)
 {
 	uint32_t gpio_num;
-	int64_t last_seen_us[sizeof(kButtonPins) / sizeof(kButtonPins[0])] = {0};
+	int64_t last_seen_us[sizeof(kButtons) / sizeof(kButtons[0])] = {0};
 	while (true) {
 		if (xQueueReceive(s_button_evt_queue, &gpio_num, portMAX_DELAY)) {
 			int idx = -1;
-			for (size_t i = 0; i < sizeof(kButtonPins) / sizeof(kButtonPins[0]); ++i) {
-				if (kButtonPins[i] == gpio_num) {
+			for (size_t i = 0; i < sizeof(kButtons) / sizeof(kButtons[0]); ++i) {
+				if (kButtons[i].pin == gpio_num) {
 					idx = (int)i;
 					break;
 				}
@@ -122,10 +160,16 @@ static void button_task(void *arg)
 				last_seen_us[idx] = now;
 			}
 
-			ESP_LOGI(BTN_TAG, "Button press detected on GPIO %ld", (long)gpio_num);
+			const char *label = (idx >= 0) ? kButtons[idx].label : "unknown";
+			ESP_LOGI(BTN_TAG, "Button press detected on GPIO %ld (%s)", (long)gpio_num, label);
 
-			if (gpio_num == GPIO_NUM_27 || gpio_num == GPIO_NUM_25) {
-				tuya_send_dp_bool(20, gpio_num == GPIO_NUM_27);
+			// Send to the specific device associated with the button
+			if (idx >= 0) {
+				DpCommand cmd{};
+				cmd.type = DpCommand::Type::BOOL;
+				cmd.dp = 20;
+				cmd.bool_val = kButtons[idx].dp_on;
+				send_dp_to_device(kButtons[idx].device_idx, cmd);
 			}
 		}
 	}
@@ -138,16 +182,15 @@ static void initialise_buttons()
 	io_conf.mode = GPIO_MODE_INPUT;
 	io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
 	io_conf.pin_bit_mask = 0;
-	for (auto pin : kButtonPins) {
-		io_conf.pin_bit_mask |= (1ULL << pin);
+	for (auto btn : kButtons) {
+		io_conf.pin_bit_mask |= (1ULL << btn.pin);
 	}
 	gpio_config(&io_conf);
 
 	s_button_evt_queue = xQueueCreate(10, sizeof(uint32_t));
-	s_dp_cmd_queue = xQueueCreate(12, sizeof(DpCommand));
 	gpio_install_isr_service(0);
-	for (auto pin : kButtonPins) {
-		gpio_isr_handler_add(pin, button_isr_handler, (void *)pin);
+	for (auto btn : kButtons) {
+		gpio_isr_handler_add(btn.pin, button_isr_handler, (void *)btn.pin);
 	}
 
 	xTaskCreatePinnedToCore(button_task, "button_task", 2048, nullptr, 5, nullptr, 1);
@@ -281,12 +324,12 @@ extern "C" void app_main(void)
 		vTaskDelete(nullptr);
 	};
 
-	constexpr size_t device_count = sizeof(kTuyaDevices) / sizeof(kTuyaDevices[0]);
-	for (size_t i = 0; i < device_count; ++i) {
+	for (size_t i = 0; i < kTuyaDeviceCount; ++i) {
+		s_dp_cmd_queues[i] = xQueueCreate(10, sizeof(DpCommand));
 		auto *cfg = new TuyaDeviceConfig{kTuyaDevices[i]};
 		ESP_LOGI(TAG, "Starting Tuya monitor for %s at %s", cfg->id.c_str(), cfg->address.c_str());
 
-		auto *bundle = new std::pair<TuyaDeviceConfig *, QueueHandle_t>(cfg, s_dp_cmd_queue);
+		auto *bundle = new std::pair<TuyaDeviceConfig *, QueueHandle_t>(cfg, s_dp_cmd_queues[i]);
 
 		// Larger stack for crypto/select buffers; pin to core 1 to leave Wi-Fi on core 0
 		char task_name[16];
