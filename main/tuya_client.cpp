@@ -424,8 +424,10 @@ TuyaClient::TuyaClient(const TuyaDeviceConfig &config, QueueHandle_t cmd_queue)
 
 void TuyaClient::monitor_loop()
 {
+	const char *dev = cfg_.id.c_str();
 	if (cfg_.version != "3.5") {
-		ESP_LOGW(LOG_TAG, "Protocol %s requested, only 3.5 is implemented here", cfg_.version.c_str());
+		ESP_LOGW(LOG_TAG, "[%s] Protocol %s requested, only 3.5 is implemented here", dev,
+		         cfg_.version.c_str());
 	}
 
 	TuyaProtocol35 client;
@@ -446,14 +448,15 @@ void TuyaClient::monitor_loop()
 			if (time(nullptr) - last_connect_attempt < 10)
 				break;
 
-			ESP_LOGI(LOG_TAG, "Connecting to %s:%d...", cfg_.address.c_str(), TUYA_COMMAND_PORT);
+			ESP_LOGI(LOG_TAG, "[%s] Connecting to %s:%d...", dev, cfg_.address.c_str(),
+			         TUYA_COMMAND_PORT);
 			last_connect_attempt = time(nullptr);
 
 			client.SetEncryptionKey(cfg_.key);
 
 			sockfd = socket(AF_INET, SOCK_STREAM, 0);
 			if (sockfd < 0) {
-				ESP_LOGE(LOG_TAG, "Failed to create socket: errno %d", errno);
+				ESP_LOGE(LOG_TAG, "[%s] Failed to create socket: errno %d", dev, errno);
 				break;
 			}
 
@@ -468,7 +471,7 @@ void TuyaClient::monitor_loop()
 
 				int err = connect(sockfd, (struct sockaddr *)&addr, sizeof(addr));
 				if (err != 0 && errno != EINPROGRESS) {
-					ESP_LOGE(LOG_TAG, "Connect failed: errno %d", errno);
+					ESP_LOGE(LOG_TAG, "[%s] Connect failed: errno %d", dev, errno);
 					state = State::DISCONNECTING;
 					continue;
 				}
@@ -487,7 +490,7 @@ void TuyaClient::monitor_loop()
 
 		case State::CONNECTING: {
 			if (time(nullptr) - state_start_time > 5) {
-				ESP_LOGE(LOG_TAG, "Connection timeout");
+				ESP_LOGE(LOG_TAG, "[%s] Connection timeout", dev);
 				state = State::DISCONNECTING;
 				continue;
 			}
@@ -504,16 +507,16 @@ void TuyaClient::monitor_loop()
 			int error = 0;
 			socklen_t len = sizeof(error);
 			if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &error, &len) != 0 || error != 0) {
-				ESP_LOGE(LOG_TAG, "Connection failed: errno %d", error);
+				ESP_LOGE(LOG_TAG, "[%s] Connection failed: errno %d", dev, error);
 				state = State::DISCONNECTING;
 				continue;
 			}
 
-			ESP_LOGI(LOG_TAG, "Connected!");
+			ESP_LOGI(LOG_TAG, "[%s] Connected!", dev);
 
 			int session_len = client.BuildSessionMessage(message_buffer);
 			if (session_len < 0) {
-				ESP_LOGE(LOG_TAG, "Failed to build session message");
+				ESP_LOGE(LOG_TAG, "[%s] Failed to build session message", dev);
 				state = State::DISCONNECTING;
 				continue;
 			}
@@ -525,7 +528,7 @@ void TuyaClient::monitor_loop()
 			if (session_len > 0) {
 				ssize_t sent = write(sockfd, message_buffer, session_len);
 				if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-					ESP_LOGE(LOG_TAG, "Write error: errno %d", errno);
+					ESP_LOGE(LOG_TAG, "[%s] Write error: errno %d", dev, errno);
 					state = State::DISCONNECTING;
 					continue;
 				}
@@ -535,7 +538,7 @@ void TuyaClient::monitor_loop()
 
 		case State::NEGOTIATING: {
 			if (time(nullptr) - state_start_time > 5) {
-				ESP_LOGE(LOG_TAG, "Negotiation timeout");
+				ESP_LOGE(LOG_TAG, "[%s] Negotiation timeout", dev);
 				state = State::DISCONNECTING;
 				continue;
 			}
@@ -546,7 +549,7 @@ void TuyaClient::monitor_loop()
 					client.DecodeSessionMessage(message_buffer, len);
 
 					if (client.isSessionEstablished()) {
-						ESP_LOGI(LOG_TAG, "Negotiation complete");
+						ESP_LOGI(LOG_TAG, "[%s] Negotiation complete", dev);
 						state = State::CONNECTED;
 						last_rx_time = time(nullptr);
 						dp_query_sent = false;
@@ -554,18 +557,18 @@ void TuyaClient::monitor_loop()
 						unsigned char session_msg[MAX_BUFFER_SIZE];
 						int session_len = client.BuildSessionMessage(session_msg);
 						if (session_len < 0) {
-							ESP_LOGE(LOG_TAG, "Negotiation failed");
+							ESP_LOGE(LOG_TAG, "[%s] Negotiation failed", dev);
 							state = State::DISCONNECTING;
 							continue;
 						} else if (session_len > 0) {
 							ssize_t sent = write(sockfd, session_msg, session_len);
 							if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-								ESP_LOGE(LOG_TAG, "Write error: errno %d", errno);
+								ESP_LOGE(LOG_TAG, "[%s] Write error: errno %d", dev, errno);
 								state = State::DISCONNECTING;
 								continue;
 							}
 							if (client.isSessionEstablished()) {
-								ESP_LOGI(LOG_TAG, "Negotiation complete");
+								ESP_LOGI(LOG_TAG, "[%s] Negotiation complete", dev);
 								state = State::CONNECTED;
 								last_rx_time = time(nullptr);
 								dp_query_sent = false;
@@ -573,7 +576,7 @@ void TuyaClient::monitor_loop()
 						}
 					}
 				} else if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-					ESP_LOGE(LOG_TAG, "Read error: errno %d", errno);
+					ESP_LOGE(LOG_TAG, "[%s] Read error: errno %d", dev, errno);
 					state = State::DISCONNECTING;
 					continue;
 				}
@@ -600,9 +603,9 @@ void TuyaClient::monitor_loop()
 					if (len > 0) {
 						ssize_t sent = write(sockfd, message_buffer, len);
 						if (sent == len) {
-							ESP_LOGI(LOG_TAG, "Sent DP%d command", cmd.dp);
+							ESP_LOGI(LOG_TAG, "[%s] Sent DP%d command", dev, cmd.dp);
 						} else {
-							ESP_LOGW(LOG_TAG, "Failed to send DP%d command", cmd.dp);
+							ESP_LOGW(LOG_TAG, "[%s] Failed to send DP%d command", dev, cmd.dp);
 						}
 					}
 				}
@@ -619,7 +622,7 @@ void TuyaClient::monitor_loop()
 				if (len > 0) {
 					ssize_t sent = write(sockfd, message_buffer, len);
 					if (sent == len) {
-						ESP_LOGI(LOG_TAG, "Sent DP query, monitoring for updates...");
+						ESP_LOGI(LOG_TAG, "[%s] Sent DP query, monitoring for updates...", dev);
 						dp_query_sent = true;
 					}
 				}
@@ -630,14 +633,14 @@ void TuyaClient::monitor_loop()
 				last_rx_time = time(nullptr);
 				std::string decoded = client.DecodeTuyaMessage(message_buffer, len);
 				if (!decoded.empty()) {
-					ESP_LOGI(LOG_TAG, "Received: %s", decoded.c_str());
+					ESP_LOGI(LOG_TAG, "[%s] Received: %s", dev, decoded.c_str());
 				}
 			} else if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-				ESP_LOGE(LOG_TAG, "Read error: errno %d", errno);
+				ESP_LOGE(LOG_TAG, "[%s] Read error: errno %d", dev, errno);
 				state = State::DISCONNECTING;
 				continue;
 			} else if (len == 0) {
-				ESP_LOGW(LOG_TAG, "Connection closed by device");
+				ESP_LOGW(LOG_TAG, "[%s] Connection closed by device", dev);
 				state = State::DISCONNECTING;
 				continue;
 			}
@@ -648,7 +651,7 @@ void TuyaClient::monitor_loop()
 				if (len > 0) {
 					ssize_t sent = write(sockfd, message_buffer, len);
 					if (sent == len) {
-						ESP_LOGI(LOG_TAG, "Sent heartbeat");
+						ESP_LOGI(LOG_TAG, "[%s] Sent heartbeat", dev);
 						last_rx_time = now_hb;
 					}
 				}

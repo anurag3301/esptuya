@@ -1,5 +1,6 @@
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <utility>
@@ -36,6 +37,8 @@ static OLED_Config s_oled_cfg{};
 // Tuya devices (extendable list)
 static TuyaDeviceConfig kTuyaDevices[] = {
     {"d70e605179edee94404oie", "bcZx:vssLzn6qFds", "192.168.0.100", "3.5"},
+    {"d7db896f97ef916559rupj", "1LlwJ}]'K^Uo|FeG", "192.168.0.101", "3.5"},
+    {"d7e99af7c96c2ed634oi2p", "1b2+q_?*EdJIsB+o", "192.168.0.102", "3.5"},
 };
 
 extern "C" bool tuya_send_dp_bool(int dp, bool value)
@@ -141,7 +144,7 @@ static void initialise_buttons()
 	gpio_config(&io_conf);
 
 	s_button_evt_queue = xQueueCreate(10, sizeof(uint32_t));
-	s_dp_cmd_queue = xQueueCreate(5, sizeof(DpCommand));
+	s_dp_cmd_queue = xQueueCreate(12, sizeof(DpCommand));
 	gpio_install_isr_service(0);
 	for (auto pin : kButtonPins) {
 		gpio_isr_handler_add(pin, button_isr_handler, (void *)pin);
@@ -268,10 +271,6 @@ extern "C" void app_main(void)
 	initialise_wifi();
 	initialise_buttons();
 
-	auto *cfg = new TuyaDeviceConfig{kTuyaDevices[0]};
-
-	ESP_LOGI(TAG, "Starting Tuya monitor for %s at %s", cfg->id.c_str(), cfg->address.c_str());
-
 	auto tuya_task = [](void *arg) {
 		auto *bundle = static_cast<std::pair<TuyaDeviceConfig *, QueueHandle_t> *>(arg);
 		std::unique_ptr<TuyaDeviceConfig> cfg_ptr(bundle->first);
@@ -282,7 +281,16 @@ extern "C" void app_main(void)
 		vTaskDelete(nullptr);
 	};
 
-	// Larger stack for crypto/select buffers; pin to core 1 to leave Wi-Fi on core 0
-	auto *bundle = new std::pair<TuyaDeviceConfig *, QueueHandle_t>(cfg, s_dp_cmd_queue);
-	xTaskCreatePinnedToCore(tuya_task, "tuya_monitor", 12288, bundle, 5, nullptr, 1);
+	constexpr size_t device_count = sizeof(kTuyaDevices) / sizeof(kTuyaDevices[0]);
+	for (size_t i = 0; i < device_count; ++i) {
+		auto *cfg = new TuyaDeviceConfig{kTuyaDevices[i]};
+		ESP_LOGI(TAG, "Starting Tuya monitor for %s at %s", cfg->id.c_str(), cfg->address.c_str());
+
+		auto *bundle = new std::pair<TuyaDeviceConfig *, QueueHandle_t>(cfg, s_dp_cmd_queue);
+
+		// Larger stack for crypto/select buffers; pin to core 1 to leave Wi-Fi on core 0
+		char task_name[16];
+		std::snprintf(task_name, sizeof(task_name), "tuya_%u", (unsigned)i);
+		xTaskCreatePinnedToCore(tuya_task, task_name, 12288, bundle, 5, nullptr, 1);
+	}
 }
